@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Precision Pool</title>
+<style>
+  body { margin: 0; background-color: #1a1a1a; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; height: 100vh; overflow: hidden; }
+  #game-container { display: flex; flex-direction: column; align-items: center; margin-top: 50px; }
+  canvas { background-color: #0d4a22; box-shadow: 0 0 20px rgba(0,0,0,0.8); border: 15px solid #5c3a21; border-radius: 10px; }
+  #control-panel { background: #2a2a2a; border-radius: 8px; padding: 20px 40px; display: flex; gap: 50px; margin-top: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.6); align-items: center; }
+  .control-group { display: flex; flex-direction: column; align-items: center; }
+  .control-row { display: flex; align-items: center; gap: 10px; }
+  input[type=number] { background: #111; color: #0f0; border: 1px solid #444; padding: 8px; width: 100px; text-align: center; font-family: monospace; font-size: 18px; border-radius: 4px; outline: none; }
+  input[type=number]:focus { border-color: #0f0; }
+  button { background: #444; color: #fff; border: none; padding: 8px 15px; cursor: pointer; border-radius: 4px; font-weight: bold; font-size: 16px; transition: background 0.2s; }
+  button:hover { background: #555; }
+  #shoot-btn { background: #d9381e; font-size: 20px; padding: 15px 40px; }
+  #shoot-btn:hover { background: #e04a32; }
+  #shoot-btn:disabled { background: #555; cursor: not-allowed; }
+  label { font-size: 13px; text-transform: uppercase; color: #aaa; margin-bottom: 8px; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="pool-canvas" width="800" height="400"></canvas>
+  <div id="control-panel">
+    <div class="control-group">
+      <label>Cue Direction (Angle)</label>
+      <div class="control-row">
+        <button id="angle-down">▼</button>
+        <input type="number" id="angle-input" step="0.01" value="0.00">
+        <button id="angle-up">▲</button>
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Strike Power (%)</label>
+      <div class="control-row">
+        <button id="power-down">-</button>
+        <input type="number" id="power-input" step="0.1" value="50.0">
+        <button id="power-up">+</button>
+      </div>
+    </div>
+    <button id="shoot-btn">SHOOT</button>
+  </div>
+</div>
+<script>
+class Vec2 {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+  }
+  add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+  sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+  mult(n) { return new Vec2(this.x * n, this.y * n); }
+  div(n) { return new Vec2(this.x / n, this.y / n); }
+  magSq() { return this.x * this.x + this.y * this.y; }
+  mag() { return Math.sqrt(this.magSq()); }
+  normalize() { let m = this.mag(); return m === 0 ? new Vec2(0,0) : this.div(m); }
+  dot(v) { return this.x * v.x + this.y * v.y; }
+  copy() { return new Vec2(this.x, this.y); }
+  dist(v) { return this.sub(v).mag(); }
+}
+
+class Ball {
+    constructor(x, y, radius, color, isCue = false) {
+        this.pos = new Vec2(x, y);
+        this.vel = new Vec2(0, 0);
+        this.radius = radius;
+        this.mass = 1;
+        this.color = color;
+        this.isCue = isCue;
+        this.active = true;
+    }
+    copy() {
+        let b = new Ball(this.pos.x, this.pos.y, this.radius, this.color, this.isCue);
+        b.vel = this.vel.copy();
+        b.active = this.active;
+        return b;
+    }
+}
+
+const CONSTANTS = {
+    BALL_RADIUS: 12,
+    TABLE_WIDTH: 800,
+    TABLE_HEIGHT: 400,
+    POCKET_RADIUS: 25,
+    FRICTION: 0.99, // Deceleration multiplier per step
+    RESTITUTION_CUSHION: 0.8,
+    RESTITUTION_BALL: 0.9,
+    MIN_VELOCITY: 0.05, // Below this velocity, ball stops
+    MAX_POWER: 30, // Max initial velocity magnitude
+    TIMESTEP: 1, // Constant time step (1 for simplicity)
+    SUBSTEPS: 8 // Substepping for better collision accuracy
+};
+
+const POCKETS = [
+    new Vec2(0, 0),
+    new Vec2(CONSTANTS.TABLE_WIDTH / 2, 0),
+    new Vec2(CONSTANTS.TABLE_WIDTH, 0),
+    new Vec2(0, CONSTANTS.TABLE_HEIGHT),
+    new Vec2(CONSTANTS.TABLE_WIDTH / 2, CONSTANTS.TABLE_HEIGHT),
+    new Vec2(CONSTANTS.TABLE_WIDTH, CONSTANTS.TABLE_HEIGHT)
+];
+
+function stepPhysics(balls) {
+    let dt = CONSTANTS.TIMESTEP / CONSTANTS.SUBSTEPS;
+
+    for (let step = 0; step < CONSTANTS.SUBSTEPS; step++) {
+        // Move balls
+        for (let ball of balls) {
+            if (!ball.active) continue;
+            ball.pos = ball.pos.add(ball.vel.mult(dt));
+        }
+
+        // Handle Collisions
+        for (let i = 0; i < balls.length; i++) {
+            let b1 = balls[i];
+            if (!b1.active) continue;
+
+            // Ball-Ball
+            for (let j = i + 1; j < balls.length; j++) {
+                let b2 = balls[j];
+                if (!b2.active) continue;
+
+                let distVec = b1.pos.sub(b2.pos);
+                let dist = distVec.mag();
+                let minDist = b1.radius + b2.radius;
+
+                if (dist < minDist) {
+                    // Resolve overlap
+                    let overlap = minDist - dist;
+                    let n = distVec.normalize();
+                    b1.pos = b1.pos.add(n.mult(overlap / 2));
+                    b2.pos = b2.pos.sub(n.mult(overlap / 2));
+
+                    // Resolve velocities
+                    let relVel = b1.vel.sub(b2.vel);
+                    let velAlongNormal = relVel.dot(n);
+
+                    if (velAlongNormal > 0) continue; // Moving apart
+
+                    let e = CONSTANTS.RESTITUTION_BALL;
+                    let jMag = -(1 + e) * velAlongNormal;
+                    jMag /= (1 / b1.mass + 1 / b2.mass);
+
+                    let impulse = n.mult(jMag);
+                    b1.vel = b1.vel.add(impulse.div(b1.mass));
+                    b2.vel = b2.vel.sub(impulse.div(b2.mass));
+                }
+            }
+
+            // Ball-Cushion
+            if (b1.pos.x - b1.radius < 0) {
+                b1.pos.x = b1.radius;
+                b1.vel.x *= -CONSTANTS.RESTITUTION_CUSHION;
+            } else if (b1.pos.x + b1.radius > CONSTANTS.TABLE_WIDTH) {
+                b1.pos.x = CONSTANTS.TABLE_WIDTH - b1.radius;
+                b1.vel.x *= -CONSTANTS.RESTITUTION_CUSHION;
+            }
+
+            if (b1.pos.y - b1.radius < 0) {
+                b1.pos.y = b1.radius;
+                b1.vel.y *= -CONSTANTS.RESTITUTION_CUSHION;
+            } else if (b1.pos.y + b1.radius > CONSTANTS.TABLE_HEIGHT) {
+                b1.pos.y = CONSTANTS.TABLE_HEIGHT - b1.radius;
+                b1.vel.y *= -CONSTANTS.RESTITUTION_CUSHION;
+            }
+
+            // Pockets
+            for (let p of POCKETS) {
+                if (b1.pos.dist(p) < CONSTANTS.POCKET_RADIUS) {
+                    b1.active = false;
+                    b1.vel = new Vec2(0,0);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Apply friction and stop condition (once per full step, not substep)
+    for (let ball of balls) {
+        if (!ball.active) continue;
+        ball.vel = ball.vel.mult(CONSTANTS.FRICTION);
+        if (ball.vel.magSq() < CONSTANTS.MIN_VELOCITY * CONSTANTS.MIN_VELOCITY) {
+            ball.vel = new Vec2(0, 0);
+        }
+    }
+}
+
+function getPrediction(balls, angleDeg, powerPercent) {
+    // Return empty if no active balls or white ball is not active
+    let cueBall = balls.find(b => b.isCue);
+    if (!cueBall || !cueBall.active) return { paths: [], ghostBall: null };
+
+    // Deep copy balls
+    let simBalls = balls.map(b => b.copy());
+    let simCueBall = simBalls.find(b => b.isCue);
+
+    // Apply initial impulse
+    let angleRad = angleDeg * Math.PI / 180;
+    let powerMag = (powerPercent / 100) * CONSTANTS.MAX_POWER;
+    simCueBall.vel = new Vec2(Math.cos(angleRad), Math.sin(angleRad)).mult(powerMag);
+
+    let paths = simBalls.map(b => [b.pos.copy()]);
+    let ghostBall = null;
+    let hitDetected = false;
+
+    // Simulate forward
+    let maxSteps = 1000; // Fail-safe to avoid infinite loops
+    let steps = 0;
+
+    // Check if any ball is moving
+    function isMoving() {
+        return simBalls.some(b => b.active && b.vel.magSq() > 0);
+    }
+
+    while (isMoving() && steps < maxSteps) {
+        // Track pre-step positions to record path changes and collisions
+        let prePos = simBalls.map(b => b.pos.copy());
+        let preActive = simBalls.map(b => b.active);
+        let preVel = simBalls.map(b => b.vel.copy());
+
+        stepPhysics(simBalls);
+
+        for (let i = 0; i < simBalls.length; i++) {
+            let b = simBalls[i];
+
+            // If just deactivated (pocketed)
+            if (preActive[i] && !b.active) {
+                 paths[i].push(b.pos.copy());
+            }
+
+            // Record path on significant change (bounce, stop, or just periodic)
+            if (b.active) {
+                // To detect collisions, we check if velocity changed significantly or it stopped
+                let velChangeSq = b.vel.sub(preVel[i]).magSq();
+                if (velChangeSq > 0.001 || b.vel.magSq() === 0) {
+                     paths[i].push(b.pos.copy());
+                } else if (steps % 10 === 0) { // Add points periodically for curved paths (if we added spin, but we don't, straight paths are fine)
+                     // actually, we only really need endpoints and bounce points. Let's just record bounces, stops, and periodic to be safe.
+                     // A simple way is to record if velocity direction changes or if we stop
+                     let v1 = preVel[i].normalize();
+                     let v2 = b.vel.normalize();
+                     if (v1.dot(v2) < 0.999 || b.vel.magSq() === 0) {
+                         paths[i].push(b.pos.copy());
+                     }
+                }
+            }
+        }
+
+        // Special check for ghost ball (first time cue ball hits red ball)
+        if (!hitDetected) {
+            let s_cue = simBalls.find(b => b.isCue);
+            let s_red = simBalls.find(b => !b.isCue);
+
+            if (s_cue && s_red && s_cue.active && s_red.active) {
+                 // The physics step might have resolved an overlap, but we can detect a hit
+                 // if the red ball's velocity suddenly became non-zero when it was zero before,
+                 // or by checking the preVel and current vel of red ball.
+                 // Actually, simpler: before the step, we check distance. But we already run stepPhysics.
+                 // We can check if the relative velocity changed drastically, or just check if red ball gained velocity
+                 let redIdx = simBalls.indexOf(s_red);
+                 if (preVel[redIdx].magSq() === 0 && s_red.vel.magSq() > 0) {
+                     // Hit occurred.
+                     // Estimate ghost ball position:
+                     // It's the position of the cue ball just before the step that caused the hit,
+                     // or slightly adjusted. For visual purposes, prePos of cue ball is close enough.
+                     ghostBall = prePos[simBalls.indexOf(s_cue)].copy();
+                     hitDetected = true;
+
+                     // We also force recording a point here for the paths
+                     paths[simBalls.indexOf(s_cue)].push(ghostBall.copy());
+                     paths[simBalls.indexOf(s_red)].push(prePos[simBalls.indexOf(s_red)].copy());
+                 }
+            }
+        }
+
+        steps++;
+    }
+
+    // Add final positions
+    for (let i = 0; i < simBalls.length; i++) {
+        if (simBalls[i].active) {
+            paths[i].push(simBalls[i].pos.copy());
+        }
+    }
+
+    return {
+        paths: paths,
+        ghostBall: ghostBall
+    };
+}
+
+const canvas = document.getElementById('pool-canvas');
+const ctx = canvas.getContext('2d');
+
+let balls = [
+    new Ball(200, 200, CONSTANTS.BALL_RADIUS, '#ffffff', true), // White ball
+    new Ball(600, 200, CONSTANTS.BALL_RADIUS, '#e72512', false) // Red ball
+];
+
+let gameState = 'aiming'; // 'aiming' or 'shooting'
+let currentPrediction = null;
+
+function render() {
+    // Clear background
+    ctx.fillStyle = '#0d4a22';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw pockets
+    ctx.fillStyle = '#0a0a0a';
+    for (let p of POCKETS) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, CONSTANTS.POCKET_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Draw prediction if aiming
+    if (gameState === 'aiming' && currentPrediction) {
+        let paths = currentPrediction.paths;
+        let ghostBall = currentPrediction.ghostBall;
+
+        // Draw paths
+        for (let i = 0; i < paths.length; i++) {
+            let path = paths[i];
+            if (path.length < 2) continue;
+
+            let isCuePath = balls[i].isCue;
+
+            ctx.beginPath();
+            ctx.moveTo(path[0].x, path[0].y);
+            for (let j = 1; j < path.length; j++) {
+                ctx.lineTo(path[j].x, path[j].y);
+            }
+
+            ctx.lineWidth = 2;
+            if (isCuePath) {
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                ctx.setLineDash([5, 5]); // Dashed line for cue
+            } else {
+                ctx.strokeStyle = 'rgba(231, 37, 18, 0.6)';
+                ctx.setLineDash([]); // Solid line for red ball
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw end point marker
+            let endPoint = path[path.length - 1];
+            ctx.beginPath();
+            ctx.arc(endPoint.x, endPoint.y, 3, 0, Math.PI * 2);
+            ctx.fillStyle = isCuePath ? 'rgba(255, 255, 255, 0.8)' : 'rgba(231, 37, 18, 0.8)';
+            ctx.fill();
+        }
+
+        // Draw Ghost Ball
+        if (ghostBall) {
+            ctx.beginPath();
+            ctx.arc(ghostBall.x, ghostBall.y, CONSTANTS.BALL_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    }
+
+    // Draw balls
+    for (let ball of balls) {
+        if (!ball.active) continue;
+
+        // Shadow
+        ctx.beginPath();
+        ctx.arc(ball.pos.x + 2, ball.pos.y + 2, ball.radius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.fill();
+
+        // Ball body
+        ctx.beginPath();
+        ctx.arc(ball.pos.x, ball.pos.y, ball.radius, 0, Math.PI * 2);
+        ctx.fillStyle = ball.color;
+        ctx.fill();
+
+        // Highlight
+        ctx.beginPath();
+        ctx.arc(ball.pos.x - 4, ball.pos.y - 4, ball.radius * 0.3, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.fill();
+    }
+}
+
+function gameLoop() {
+    if (gameState === 'shooting') {
+        stepPhysics(balls);
+
+        let moving = balls.some(b => b.active && b.vel.magSq() > 0);
+        if (!moving) {
+            gameState = 'aiming';
+            checkGameState();
+        }
+    } else {
+        // Update prediction
+        let angle = parseFloat(document.getElementById('angle-input').value) || 0;
+        let power = parseFloat(document.getElementById('power-input').value) || 0;
+        currentPrediction = getPrediction(balls, angle, power);
+    }
+
+    render();
+    requestAnimationFrame(gameLoop);
+}
+
+function checkGameState() {
+    let cueBall = balls.find(b => b.isCue);
+    let redBall = balls.find(b => !b.isCue);
+
+    // If White ball is pocketed (scratch)
+    if (!cueBall.active) {
+        cueBall.pos = new Vec2(200, 200);
+        cueBall.vel = new Vec2(0, 0);
+        cueBall.active = true;
+    }
+
+    // If Red ball is pocketed
+    if (!redBall.active) {
+        // Respawn at a random valid location
+        let valid = false;
+        while (!valid) {
+            let x = Math.random() * (CONSTANTS.TABLE_WIDTH - 2 * CONSTANTS.BALL_RADIUS) + CONSTANTS.BALL_RADIUS;
+            let y = Math.random() * (CONSTANTS.TABLE_HEIGHT - 2 * CONSTANTS.BALL_RADIUS) + CONSTANTS.BALL_RADIUS;
+
+            let testPos = new Vec2(x, y);
+
+            // Ensure it doesn't overlap with the cue ball
+            if (cueBall.active && testPos.dist(cueBall.pos) > CONSTANTS.BALL_RADIUS * 2 + 10) {
+                // Ensure it's not too close to a pocket
+                let pocketClear = POCKETS.every(p => testPos.dist(p) > CONSTANTS.POCKET_RADIUS + CONSTANTS.BALL_RADIUS + 5);
+
+                if (pocketClear) {
+                    redBall.pos = testPos;
+                    redBall.vel = new Vec2(0, 0);
+                    redBall.active = true;
+                    valid = true;
+                }
+            }
+        }
+    }
+}
+
+
+const angleInput = document.getElementById('angle-input');
+const powerInput = document.getElementById('power-input');
+const shootBtn = document.getElementById('shoot-btn');
+
+function updateAngle(delta) {
+    let val = parseFloat(angleInput.value) + delta;
+    if (val < 0) val += 360;
+    if (val >= 360) val -= 360;
+    angleInput.value = val.toFixed(2);
+}
+
+function updatePower(delta) {
+    let val = parseFloat(powerInput.value) + delta;
+    if (val < 0) val = 0;
+    if (val > 100) val = 100;
+    powerInput.value = val.toFixed(1);
+}
+
+document.getElementById('angle-up').addEventListener('click', () => updateAngle(1));
+document.getElementById('angle-down').addEventListener('click', () => updateAngle(-1));
+document.getElementById('power-up').addEventListener('click', () => updatePower(5));
+document.getElementById('power-down').addEventListener('click', () => updatePower(-5));
+
+angleInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        updateAngle(0.1);
+    } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        updateAngle(-0.1);
+    }
+});
+
+powerInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        updatePower(1);
+    } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        updatePower(-1);
+    }
+});
+
+shootBtn.addEventListener('click', () => {
+    if (gameState !== 'aiming') return;
+
+    let cueBall = balls.find(b => b.isCue);
+    if (!cueBall || !cueBall.active) return;
+
+    let angleDeg = parseFloat(angleInput.value);
+    let powerPercent = parseFloat(powerInput.value);
+
+    let angleRad = angleDeg * Math.PI / 180;
+    let powerMag = (powerPercent / 100) * CONSTANTS.MAX_POWER;
+
+    cueBall.vel = new Vec2(Math.cos(angleRad), Math.sin(angleRad)).mult(powerMag);
+
+    gameState = 'shooting';
+});
+
+// Start loop
+requestAnimationFrame(gameLoop);
+
+
+</script>
+</body>
+</html>
